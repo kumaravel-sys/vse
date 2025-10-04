@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Trainer — Virtual Share Market</title>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { 
+      getAuth, 
+      signInWithEmailAndPassword, 
+      createUserWithEmailAndPassword, 
+      signOut 
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { 
+      getFirestore, 
+      doc, 
+      setDoc, 
+      getDoc, 
+      updateDoc, 
+      collection, 
+      getDocs 
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // 🔥 Your Firebase Configuration
+    const firebaseConfig = {
+      apiKey: "AIzaSyB29xewVwNPd3TNBOvWZuIZvvKG1UKxy_w",
+      authDomain: "stocktrainer-d9e64.firebaseapp.com",
+      projectId: "stocktrainer-d9e64",
+      storageBucket: "stocktrainer-d9e64.firebasestorage.app",
+      messagingSenderId: "699145381471",
+      appId: "1:699145381471:web:bc1736154ff0e1877c9dea"
+    };
+
+    // Initialize Firebase
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // Global
+    let currentUser = null;
+    const ADMIN_EMAIL = "admin6@vse.com";
+    const ADMIN_PASSWORD = "adminvse2k25";
+    const FINNHUB_KEY = "d3bm7n1r01qqg7bv706gd3bm7n1r01qqg7bv7070";
+
+    // DOM
+    const loginSection = document.getElementById("loginSection");
+    const mainSection = document.getElementById("mainSection");
+    const adminPanel = document.getElementById("adminPanel");
+    const balanceSpan = document.getElementById("balance");
+    const companyInput = document.getElementById("companySearch");
+    const searchResults = document.getElementById("searchResults");
+    const chartContainer = document.getElementById("chartContainer");
+    const portfolioDiv = document.getElementById("portfolio");
+
+    // ---- LOGIN / REGISTER ----
+    window.login = async () => {
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value.trim();
+      if (!email || !password) return alert("Enter email and password!");
+
+      try {
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        currentUser = userCredential.user;
+        await loadUserData(email);
+      } catch (error) {
+        if (error.code === "auth/user-not-found") {
+          const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+          currentUser = userCredential.user;
+          await setDoc(doc(db, "users", email), {
+            balance: 50000,
+            portfolio: {},
+            profit: 0
+          });
+          await loadUserData(email);
+        } else {
+          alert("Login failed: " + error.message);
+        }
+      }
+    };
+
+    // ---- LOGOUT ----
+    window.logout = async () => {
+      await signOut(auth);
+      currentUser = null;
+      loginSection.style.display = "block";
+      mainSection.style.display = "none";
+      adminPanel.style.display = "none";
+    };
+
+    // ---- LOAD USER / ADMIN ----
+    async function loadUserData(email) {
+      if (email === ADMIN_EMAIL) {
+        // Admin
+        loginSection.style.display = "none";
+        mainSection.style.display = "none";
+        adminPanel.style.display = "block";
+        loadAdminPanel();
+        return;
+      }
+
+      loginSection.style.display = "none";
+      mainSection.style.display = "block";
+      const ref = doc(db, "users", email);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const data = snap.data();
+        balanceSpan.innerText = data.balance.toFixed(2);
+        loadPortfolio(data.portfolio);
+      }
+    }
+
+    // ---- SEARCH COMPANY ----
+    let searchTimeout = null;
+    companyInput.addEventListener("input", () => {
+      clearTimeout(searchTimeout);
+      const query = companyInput.value.trim();
+      if (query.length < 2) {
+        searchResults.innerHTML = "";
+        return;
+      }
+      searchTimeout = setTimeout(() => searchCompany(query), 400);
+    });
+
+    async function searchCompany(query) {
+      const url = `https://finnhub.io/api/v1/search?q=${query}&token=${FINNHUB_KEY}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      searchResults.innerHTML = data.result
+        .filter(c => c.symbol.endsWith("NS"))
+        .slice(0, 5)
+        .map(c => `<div class="result" onclick="selectCompany('${c.symbol}', '${c.description}')">${c.description} (${c.symbol})</div>`)
+        .join("");
+    }
+
+    window.selectCompany = async (symbol, name) => {
+      companyInput.value = name;
+      searchResults.innerHTML = "";
+      chartContainer.innerHTML = `<div id="tv_chart"></div>`;
+      new TradingView.widget({
+        autosize: true,
+        symbol: `NSE:${symbol.replace(".NS", "")}`,
+        interval: "D",
+        container_id: "tv_chart",
+        theme: "light",
+        style: "1",
+        locale: "in",
+        toolbar_bg: "#f1f3f6",
+      });
+      document.getElementById("buySell").style.display = "block";
+      document.getElementById("buySymbol").value = symbol;
+      await updatePrice(symbol);
+    };
+
+    async function updatePrice(symbol) {
+      const url = `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      document.getElementById("livePrice").innerText = data.c ? data.c.toFixed(2) : "N/A";
+    }
+
+    // ---- BUY ----
+    window.buyStock = async () => {
+      const symbol = document.getElementById("buySymbol").value;
+      const qty = parseInt(document.getElementById("qty").value);
+      const price = parseFloat(document.getElementById("livePrice").innerText);
+      if (!qty || qty <= 0 || !price) return alert("Invalid input.");
+
+      const email = currentUser.email;
+      const ref = doc(db, "users", email);
+      const snap = await getDoc(ref);
+      const data = snap.data();
+
+      const cost = qty * price;
+      if (data.balance < cost) return alert("Not enough balance!");
+
+      data.balance -= cost;
+      if (!data.portfolio[symbol]) data.portfolio[symbol] = { qty: 0, avg: 0 };
+      const old = data.portfolio[symbol];
+      const totalCost = old.qty * old.avg + cost;
+      const newQty = old.qty + qty;
+      old.avg = totalCost / newQty;
+      old.qty = newQty;
+
+      await updateDoc(ref, data);
+      balanceSpan.innerText = data.balance.toFixed(2);
+      loadPortfolio(data.portfolio);
+    };
+
+    // ---- SELL ----
+    window.sellStock = async () => {
+      const symbol = document.getElementById("buySymbol").value;
+      const qty = parseInt(document.getElementById("qty").value);
+      const price = parseFloat(document.getElementById("livePrice").innerText);
+      if (!qty || qty <= 0) return alert("Invalid quantity.");
+
+      const email = currentUser.email;
+      const ref = doc(db, "users", email);
+      const snap = await getDoc(ref);
+      const data = snap.data();
+
+      if (!data.portfolio[symbol] || data.portfolio[symbol].qty < qty)
+        return alert("Not enough shares!");
+
+      const profit = (price - data.portfolio[symbol].avg) * qty;
+      data.portfolio[symbol].qty -= qty;
+      if (data.portfolio[symbol].qty === 0) delete data.portfolio[symbol];
+      data.balance += qty * price;
+      data.profit += profit;
+
+      await updateDoc(ref, data);
+      balanceSpan.innerText = data.balance.toFixed(2);
+      loadPortfolio(data.portfolio);
+      alert(`Sell successful. Profit/Loss: ₹${profit.toFixed(2)}`);
+    };
+
+    // ---- PORTFOLIO ----
+    function loadPortfolio(portfolio) {
+      portfolioDiv.innerHTML = "";
+      for (const [sym, info] of Object.entries(portfolio)) {
+        portfolioDiv.innerHTML += `<div>${sym}: ${info.qty} @ ₹${info.avg.toFixed(2)}</div>`;
+      }
+    }
+
+    // ---- ADMIN PANEL ----
+    async function loadAdminPanel() {
+      const usersRef = collection(db, "users");
+      const docs = await getDocs(usersRef);
+      let arr = [];
+      docs.forEach(d => {
+        const data = d.data();
+        arr.push({
+          email: d.id,
+          profit: data.profit || 0
+        });
+      });
+      arr.sort((a, b) => b.profit - a.profit);
+      document.getElementById("adminList").innerHTML = arr.map((u, i) =>
+        `<div>${i + 1}. ${u.email} — Profit: ₹${u.profit.toFixed(2)}</div>`
+      ).join("");
+    }
+
+  </script>
+
+  <!-- TradingView -->
+  <script src="https://s3.tradingview.com/tv.js"></script>
+
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    input, button { padding: 8px; margin: 4px; }
+    #mainSection, #adminPanel { display: none; }
+    #searchResults div { background: #eee; margin: 2px; padding: 5px; cursor: pointer; }
+    #searchResults div:hover { background: #ccc; }
+  </style>
+</head>
+<body>
+
+  <div id="loginSection">
+    <h2>Login</h2>
+    <input id="email" type="email" placeholder="Email"><br>
+    <input id="password" type="password" placeholder="Password"><br>
+    <button onclick="login()">Login / Register</button>
+  </div>
+
+  <div id="mainSection">
+    <button onclick="logout()">Logout</button>
+    <h3>Balance: ₹<span id="balance">0</span></h3>
+
+    <input id="companySearch" placeholder="Search company (e.g. Tata)" />
+    <div id="searchResults"></div>
+
+    <div id="chartContainer" style="height:400px;"></div>
+
+    <div id="buySell" style="display:none;">
+      <p>Live Price: ₹<span id="livePrice"></span></p>
+      <input id="qty" type="number" placeholder="Quantity">
+      <input id="buySymbol" type="hidden">
+      <button onclick="buyStock()">Buy</button>
+      <button onclick="sellStock()">Sell</button>
+    </div>
+
+    <h3>Portfolio</h3>
+    <div id="portfolio"></div>
+  </div>
+
+  <div id="adminPanel">
+    <button onclick="logout()">Logout</button>
+    <h2>Admin Panel — Leaderboard</h2>
+    <div id="adminList"></div>
+  </div>
+
+</body>
+</html>
